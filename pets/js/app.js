@@ -1,7 +1,8 @@
-import { state, loadState, save, upsert, remove, list, uid, putFile, fileUrl, exportAll, importAll, wipeAll } from './store.js';
+import { state, storage, loadState, save, upsert, remove, list, uid, putFile, fileUrl, exportAll, importAll, wipeAll } from './store.js';
+import { env, initEnv } from './env.js';
 import * as D from './data.js';
 import * as L from './logic.js';
-import { prepareImage, processPhoto } from './scan.js';
+import { prepareImage, processPhoto, sampleReady } from './scan.js';
 import { $, $$, esc, I, toast, openSheet, openForm, confirmBox, afterSheets, pickFile, setField, liRow, readLiRows } from './ui.js';
 
 const ui = { vacFilter: 'all', calMonth: L.today().slice(0, 7), calSel: L.today(), calAll: false, charts: new Map() };
@@ -9,10 +10,10 @@ const ui = { vacFilter: 'all', calMonth: L.today().slice(0, 7), calSel: L.today(
 // ---------- маршрутизация ----------
 function route() {
   const h = location.hash.replace(/^#\/?/, '') || 'home';
-  const [name, ...args] = h.split('/');
+  const [name, ...args] = h.split(/[-/]/);
   return { name, args };
 }
-const go = r => { if (location.hash === '#/' + r) render(); else location.hash = '#/' + r; };
+const go = r => { const h = '#' + r.replace(/\//g, '-'); if (location.hash === h) render(); else location.hash = h; };
 window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
 
 // ---------- общие куски разметки ----------
@@ -41,7 +42,7 @@ const NAV = [
   { r: 'heat', label: 'Течка', icon: I.flower, heat: true },
   { r: 'health', label: 'Здоровье', icon: I.health },
   { r: 'docs', label: 'Документы', icon: I.file },
-  { r: 'settings', label: 'Настройки', icon: I.settings },
+  { r: 'prefs', label: 'Настройки', icon: I.settings },
 ];
 
 function renderSidebar(pet, r) {
@@ -57,13 +58,13 @@ function renderSidebar(pet, r) {
   <nav class="side-nav">
     ${NAV.filter(n => !n.heat || L.tracksHeat(pet)).map(n => `<button class="side-link ${r.name === n.r || (n.r === 'health' && r.name === 'test') ? 'active' : ''}" data-act="go" data-route="${n.r}">${n.icon}${n.label}</button>`).join('')}
   </nav>
-  <div class="side-foot tiny muted">Данные хранятся только на этом устройстве.<br>Не заменяет консультацию ветеринара.</div>`;
+  <div class="side-foot tiny muted">${storage.mode === 'cloud' ? 'Данные видны только вам.' : 'Данные хранятся только на этом устройстве.'}<br>Не заменяет консультацию ветеринара.</div>`;
 }
 
 function renderTopbar(pet) {
   return `<button class="pet-switch grow" data-act="petPicker" aria-label="Выбрать питомца">${avatar(pet, 'sm')}<b class="ellipsis">${esc(pet.name)}</b>${I.chevD.replace('<svg', '<svg style="width:18px;height:18px;flex:none;color:var(--muted)"')}</button>
   <button class="icon-btn" data-act="go" data-route="docs" aria-label="Документы">${I.file}</button>
-  <button class="icon-btn" data-act="go" data-route="settings" aria-label="Настройки">${I.settings}</button>`;
+  <button class="icon-btn" data-act="go" data-route="prefs" aria-label="Настройки">${I.settings}</button>`;
 }
 
 function renderTabbar(r) {
@@ -89,7 +90,7 @@ function render() {
   $('#sidebar').innerHTML = renderSidebar(pet, r);
   $('#topbar').innerHTML = renderTopbar(pet, r);
   $('#tabbar').innerHTML = renderTabbar(r);
-  const views = { home: vHome, vaccines: vVaccines, calendar: vCalendar, heat: vHeat, health: vHealth, test: vTest, docs: vDocs, settings: vSettings, pets: vPets };
+  const views = { home: vHome, vaccines: vVaccines, calendar: vCalendar, heat: vHeat, health: vHealth, test: vTest, docs: vDocs, prefs: vSettings, pets: vPets };
   ui.charts.clear();
   $('#view').innerHTML = (views[r.name] || vHome)(pet, r.args);
   hydrate($('#view'));
@@ -437,7 +438,7 @@ function vCalendar(pet) {
   if (sel?.cls.has('heat-pred') && !sel.cls.has('heat')) selFlags.push('🔮 прогноз течки');
   if (sel?.cls.has('fertile')) selFlags.push('💗 благоприятные дни для вязки');
   const monthName = first.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' }).replace(' г.', '');
-  return `<div class="view-head"><h1>Календарь</h1><button class="btn btn-sm" data-act="exportIcs" title="Добавить события в календарь телефона">${I.download} В календарь</button></div>
+  return `<div class="view-head"><h1>Календарь</h1>${env.artifact ? '' : `<button class="btn btn-sm" data-act="exportIcs" title="Добавить события в календарь телефона">${I.download} В календарь</button>`}</div>
   <div class="grid-2">
     <section class="card">
       <div class="cal-head">
@@ -765,10 +766,15 @@ function openDoc(id) {
       <label class="field"><span>Название</span><input class="input" data-doc-title value="${esc(d.title)}"></label>
       ${d.text ? `<details><summary class="small muted" style="cursor:pointer;font-weight:700">Распознанный текст</summary><pre class="ocr" style="margin-top:8px">${esc(d.text)}</pre></details>` : ''}
     </div>`,
-    foot: `<button class="btn btn-danger" data-x="del" style="flex:0 0 auto" aria-label="Удалить">${I.trash}</button><a class="btn" data-x="dl" download="${esc((d.title || 'document') + '.jpg')}">${I.download} Скачать</a><button class="btn btn-primary" data-x="ok">Готово</button>`,
+    foot: `<button class="btn btn-danger" data-x="del" style="flex:0 0 auto" aria-label="Удалить">${I.trash}</button><button class="btn" data-x="dl" type="button">${I.download} Скачать</button><button class="btn btn-primary" data-x="ok">Готово</button>`,
   });
   hydrate(sh.el);
-  fileUrl(d.fileId).then(u => { sh.foot.querySelector('[data-x=dl]').href = u; });
+  sh.foot.querySelector('[data-x=dl]').onclick = async () => {
+    try {
+      const b = await (await fetch(await fileUrl(d.fileId))).blob();
+      await download((d.title || 'документ') + '.jpg', b, 'image/jpeg');
+    } catch (e) { toast('Не удалось сохранить фото'); }
+  };
   sh.foot.querySelector('[data-x=ok]').onclick = () => {
     const t = sh.body.querySelector('[data-doc-title]').value.trim();
     if (t !== d.title) { d.title = t; save(); render(); }
@@ -787,13 +793,13 @@ const SCAN_KINDS = [['auto', '✨', 'Определить сам'], ['vaccines',
 
 function openScan(preset = 'auto') {
   let kind = preset;
-  const ai = !!state.settings.apiKey;
+  const ai = sampleReady() || (!!state.settings.apiKey && !env.artifact);
   const sh = openSheet({
     title: 'Сфотографировать документ',
     body: `<div class="stack">
       <p class="muted small" style="margin:0">Что на фото?</p>
       <div class="scan-kinds">${SCAN_KINDS.map(([k, e, l]) => `<button class="scan-kind ${k === kind ? 'on' : ''}" data-k="${k}" type="button"><span class="e">${e}</span>${l}</button>`).join('')}</div>
-      <div class="hint">${ai ? '✨ <b>Умный режим включён</b> — Claude прочитает даже рукописный ветпаспорт и печати.' : '📴 Распознавание работает прямо на устройстве — лучше всего с печатным текстом. Для рукописных ветпаспортов включите <button class="link-btn" data-act="go" data-route="settings" type="button">умный режим</button>.'}</div>
+      <div class="hint">${ai ? '✨ <b>Умный режим включён</b> — Claude прочитает даже рукописный ветпаспорт и печати.' : env.artifact ? '📴 Распознавание работает прямо на устройстве — лучше всего с печатным текстом.' : '📴 Распознавание работает прямо на устройстве — лучше всего с печатным текстом. Для рукописных ветпаспортов включите <button class="link-btn" data-act="go" data-route="prefs" type="button">умный режим</button>.'}</div>
       <p class="tiny muted" style="margin:0">Совет: положите документ на ровную поверхность при хорошем свете, чтобы текст заполнил кадр.</p>
     </div>`,
     foot: `<button class="btn" data-x="gal" type="button">${I.image} Из галереи</button><button class="btn btn-primary" data-x="cam" type="button">${I.camera} Камера</button>`,
@@ -1057,10 +1063,13 @@ function petPicker() {
 // ---------- настройки ----------
 function vSettings() {
   const s = state.settings;
-  const notifyState = !('Notification' in window) ? 'не поддерживаются этим браузером' : Notification.permission === 'granted' && s.notify ? 'включены' : Notification.permission === 'denied' ? 'запрещены в браузере' : 'выключены';
+  const notifyState = env.artifact ? 'на главной при каждом открытии' : !('Notification' in window) ? 'не поддерживаются этим браузером' : Notification.permission === 'granted' && s.notify ? 'включены' : Notification.permission === 'denied' ? 'запрещены в браузере' : 'выключены';
   return `<div class="view-head"><h1>Настройки</h1></div>
   <div class="grid-2">
-    <section class="card stack">
+    ${env.artifact ? `<section class="card stack">
+      <div class="row"><span class="bubble c-accent">${I.sparkle}</span><div class="grow"><h2>Умное распознавание</h2><div class="small muted">${sampleReady() ? '✅ через ваш Claude, ключ не нужен' : 'недоступно здесь — работает распознавание на устройстве'}</div></div></div>
+      <p class="small muted" style="margin:0">Фото документов разбирает Claude с вашего аккаунта: он понимает рукописные ветпаспорта, печати, наклейки вакцин и бланки анализов. При первом распознавании Claude попросит разрешения.</p>
+    </section>` : `<section class="card stack">
       <div class="row"><span class="bubble c-accent">${I.sparkle}</span><div class="grow"><h2>Умное распознавание</h2><div class="small muted">${s.apiKey ? '✅ включено' : 'выключено — работает офлайн-OCR'}</div></div></div>
       <p class="small muted" style="margin:0">С ключом Claude приложение понимает рукописные ветпаспорта, печати, наклейки вакцин и любые бланки анализов, а также пишет краткую сводку. Ключ можно получить на <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>. Ключ хранится только на этом устройстве и не попадает в резервные копии.</p>
       <label class="field"><span>API-ключ Claude</span><input class="input" type="password" id="set-key" placeholder="sk-ant-…" value="${esc(s.apiKey)}" autocomplete="off"></label>
@@ -1068,15 +1077,15 @@ function vSettings() {
         ${[['claude-opus-5-5', 'Claude Opus 5.5 — лучшее качество'], ['claude-sonnet-5-5', 'Claude Sonnet 5.5 — быстрее и дешевле'], ['claude-haiku-5-5', 'Claude Haiku 5.5 — самый экономный']].map(([k, l]) => `<option value="${k}" ${s.model === k ? 'selected' : ''}>${l}</option>`).join('')}
       </select></label>
       <div class="row"><button class="btn btn-primary btn-sm" data-act="saveAi">Сохранить</button>${s.apiKey ? `<button class="btn btn-sm btn-ghost" data-act="clearAi">Удалить ключ</button>` : ''}</div>
-    </section>
+    </section>`}
     <section class="card stack">
-      <div class="row"><span class="bubble c-vac">${I.bell}</span><div class="grow"><h2>Напоминания</h2><div class="small muted">Уведомления: ${notifyState}</div></div></div>
+      <div class="row"><span class="bubble c-vac">${I.bell}</span><div class="grow"><h2>Напоминания</h2><div class="small muted">${env.artifact ? 'Напоминания: ' : 'Уведомления: '}${notifyState}</div></div></div>
       <label class="field"><span>Предупреждать заранее</span><select id="set-remind">${[3, 7, 14, 30].map(n => `<option value="${n}" ${+s.reminderDays === n ? 'selected' : ''}>за ${L.nDays(n)}</option>`).join('')}</select></label>
       <div class="row wrap">
-        ${'Notification' in window ? `<button class="btn btn-sm" data-act="toggleNotify">${s.notify && Notification.permission === 'granted' ? 'Выключить уведомления' : 'Включить уведомления'}</button>` : ''}
-        <button class="btn btn-sm" data-act="exportIcs">${I.download} Экспорт в календарь (.ics)</button>
+        ${'Notification' in window && !env.artifact ? `<button class="btn btn-sm" data-act="toggleNotify">${s.notify && Notification.permission === 'granted' ? 'Выключить уведомления' : 'Включить уведомления'}</button>` : ''}
+        ${env.artifact ? '' : `<button class="btn btn-sm" data-act="exportIcs">${I.download} Экспорт в календарь (.ics)</button>`}
       </div>
-      <p class="tiny muted" style="margin:0">Уведомления показываются при открытии приложения. Чтобы напоминания приходили даже когда приложение закрыто — экспортируйте события в календарь телефона: в файле уже есть будильники.</p>
+      <p class="tiny muted" style="margin:0">${env.artifact ? 'Просроченные и ближайшие процедуры показываются на главной при каждом открытии. Уведомления на телефон и экспорт в календарь доступны в версии-приложении (PWA).' : 'Уведомления показываются при открытии приложения. Чтобы напоминания приходили даже когда приложение закрыто — экспортируйте события в календарь телефона: в файле уже есть будильники.'}</p>
     </section>
     <section class="card stack">
       <h2>Оформление</h2>
@@ -1087,7 +1096,8 @@ function vSettings() {
     </section>
     <section class="card stack">
       <h2>Данные</h2>
-      <p class="small muted" style="margin:0">Всё хранится локально в браузере. Делайте резервную копию, чтобы перенести данные на другое устройство.</p>
+      <p class="small muted" style="margin:0">${storage.mode === 'cloud' ? 'Записи хранятся в вашем личном разделе этой страницы — другие люди, которым вы её покажете, их не видят. Фото документов лежат в файлах страницы. Резервная копия переносит всё в версию-приложение и обратно.' : 'Всё хранится локально в браузере. Делайте резервную копию, чтобы перенести данные на другое устройство.'}</p>
+      ${storage.error ? `<div class="warnbox">${esc(storage.error)}</div>` : ''}
       <div class="row wrap">
         <button class="btn btn-sm" data-act="exportJson">${I.download} Резервная копия</button>
         <button class="btn btn-sm" data-act="importJson">${I.upload} Восстановить</button>
@@ -1121,14 +1131,20 @@ function buildIcs() {
   return { text: lines.join('\r\n'), n };
 }
 
-function download(name, content, type) {
+async function download(name, content, type) {
   const blob = content instanceof Blob ? content : new Blob([content], { type });
+  if (env.downloads) {
+    try { await env.downloads.save({ filename: name, data: blob }); return true; }
+    catch (e) { if (e?.code !== 'declined') toast('Не удалось сохранить файл'); return false; }
+  }
+  if (env.artifact) { toast('Сохранение файлов здесь недоступно'); return false; }
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = name;
   document.body.appendChild(a);
   a.click();
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  return true;
 }
 
 // ---------- уведомления ----------
@@ -1259,9 +1275,9 @@ const actions = {
   },
   setTheme: el => { state.settings.theme = el.dataset.k; save(); render(); },
   exportJson: async () => {
+    toast('Готовлю резервную копию…');
     const data = await exportAll();
-    download(`lapki-backup-${L.today()}.json`, JSON.stringify(data), 'application/json');
-    toast('Резервная копия сохранена');
+    if (await download(`lapki-backup-${L.today()}.json`, JSON.stringify(data), 'application/json')) toast('Резервная копия сохранена');
   },
   importJson: async () => {
     const file = await pickFile('#file-import');
@@ -1276,7 +1292,7 @@ const actions = {
   },
   demo: () => { seedDemo(); toast('Добавлены демо-питомцы — можно всё потрогать'); afterSheets(() => go('home')); },
   wipe: async () => {
-    if (!(await confirmBox('Удалить всех питомцев, записи и фото с этого устройства? Сначала сделайте резервную копию.', 'Удалить всё'))) return;
+    if (!(await confirmBox(storage.mode === 'cloud' ? 'Удалить всех питомцев, записи и фото? Сначала сделайте резервную копию.' : 'Удалить всех питомцев, записи и фото с этого устройства? Сначала сделайте резервную копию.', 'Удалить всё'))) return;
     await wipeAll();
     location.hash = '';
     render();
@@ -1309,9 +1325,13 @@ function datalists() {
 
 // ---------- старт ----------
 (async function init() {
+  await initEnv();
   await loadState();
   datalists();
   render();
+  if (storage.error) toast(storage.error);
+  window.addEventListener('lapki:storage-error', e => toast(e.detail));
+  if (env.artifact) return;
   checkReminders();
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.register('sw.js').catch(e => console.warn('SW', e));

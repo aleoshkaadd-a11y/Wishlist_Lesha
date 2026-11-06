@@ -6,6 +6,7 @@ import {
   VACCINE_NAMES, DEWORM_NAMES, FLEA_NAMES, FEED_BRANDS, LAB_PARAMS, ALLERGEN_STEMS, REC_KINDS,
   aliasIndex, findLabParam,
 } from './data.js';
+import { env } from './env.js';
 
 const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
 const SDK_URL = 'https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@1.2.0/+esm';
@@ -271,10 +272,13 @@ function loadScript(src) {
   });
 }
 export async function ocr(img, onProgress) {
-  await loadScript(TESSERACT_URL);
+  const base = env.ocrBase ? new URL(env.ocrBase, location.href).href : '';
+  await loadScript(base ? base + 'tesseract.min.js' : TESSERACT_URL);
   if (!tessWorker) {
     onProgress?.('Загружаю словари (один раз)…', 0.05);
+    const paths = base ? { workerPath: base + env.ocrWorker, corePath: base + 'core/', langPath: base + 'lang/', workerBlobURL: false } : {};
     tessWorker = await window.Tesseract.createWorker('rus+eng', 1, {
+      ...paths,
       logger: m => {
         if (m.status === 'recognizing text') onProgress?.('Читаю текст…', 0.3 + m.progress * 0.7);
         else if (m.status && m.progress != null) onProgress?.('Подготовка распознавания…', 0.05 + m.progress * 0.25);
@@ -382,8 +386,75 @@ export async function aiExtract(blob, kind, pet, settings, onProgress) {
   return r;
 }
 
+// ---------- встроенный Claude страницы claude.ai (без API-ключа) ----------
+const SAMPLE_ERR = {
+  not_granted: 'Доступ к Claude для этой страницы не разрешён',
+  sampling_disabled: 'Claude недоступен для этого аккаунта',
+  rate_limited: 'Слишком много запросов к Claude — попробуйте позже',
+  image_rejected: 'Фото не подошло — попробуйте другое (JPEG или PNG)',
+  images_unavailable: 'Отправка фото в Claude здесь недоступна',
+  refused: 'Claude не смог обработать это изображение',
+  invalid_json: 'Claude ответил в неожиданном формате — попробуйте ещё раз',
+  session_expired: 'Нужно заново войти в Claude',
+  upstream_error: 'Нет связи с Claude — попробуйте ещё раз',
+};
+export const sampleReady = () => !!(env.sample && env.sampleImages);
+
+async function sampleExtract(blob, kind, pet, onProgress) {
+  onProgress?.('Claude смотрит на фото…', 0.25);
+  const hint = kind && kind !== 'auto' ? `Пользователь указал тип документа: ${kind}.` : 'Тип документа определи сам.';
+  const petInfo = pet ? `Питомец: ${pet.species === 'cat' ? 'кошка' : pet.species === 'dog' ? 'собака' : 'животное'}, кличка ${pet.name}${pet.breed ? ', порода ' + pet.breed : ''}.` : '';
+  const prompt = `${SYSTEM}
+
+${hint} ${petInfo} Сегодня ${new Date().toISOString().slice(0, 10)}.
+Ответь ТОЛЬКО одним JSON-объектом по этой JSON-схеме (все поля обязательны, пустые строки и пустые массивы, если данных нет):
+${JSON.stringify(SCHEMA)}`;
+  let r;
+  try {
+    r = await env.sample.json(prompt, {
+      images: blob,
+      modelTier: 'complex',
+      onText: () => onProgress?.('Claude разбирает документ…', 0.7),
+    });
+  } catch (e) {
+    const code = e?.code || 'upstream_error';
+    const err = new Error(SAMPLE_ERR[code] || SAMPLE_ERR.upstream_error);
+    err.code = code;
+    throw err;
+  }
+  if (!r || typeof r !== 'object') throw new Error(SAMPLE_ERR.invalid_json);
+  onProgress?.('Готово', 1);
+  r.source = 'ai';
+  ['vaccines', 'tests', 'meds', 'feeds', 'allergies'].forEach(k => (r[k] = Array.isArray(r[k]) ? r[k] : []));
+  r.tests.forEach(t => { t.items = Array.isArray(t.items) ? t.items : []; t.items.forEach(i => {
+    ['name', 'value', 'unit', 'min', 'max'].forEach(k => (i[k] = i[k] == null ? '' : String(i[k])));
+    const p = findLabParam(i.name);
+    if (p && !i.unit) i.unit = p.unit;
+  }); });
+  return r;
+}
+
+async function ocrFallback(prepared, kind, onProgress, firstError) {
+  onProgress?.(firstError.message + '. Распознаю на устройстве…', 0.1);
+  let text;
+  try { text = await ocr(prepared.img, onProgress); }
+  catch (e2) { throw new Error(`${firstError.message}. Распознавание на устройстве тоже не удалось: ${e2.message}`); }
+  const r = parseText(text, kind);
+  r.warning = firstError.message;
+  return r;
+}
+
 export async function processPhoto(prepared, kind, pet, settings, onProgress) {
-  if (settings.apiKey) {
+  if (sampleReady()) {
+    try {
+      return await sampleExtract(prepared.blob, kind, pet, onProgress);
+    } catch (e) {
+      console.warn(e);
+      if (e.code === 'cancelled') throw e;
+      return ocrFallback(prepared, kind, onProgress, e);
+    }
+  }
+  if (settings.apiKey && !env.artifact) {
     try {
       return await aiExtract(prepared.blob, kind, pet, settings, onProgress);
     } catch (e) {

@@ -1,8 +1,8 @@
 // Офлайн-работа: оболочка приложения кэшируется, данные живут в IndexedDB.
-const CACHE = 'lapki-v1';
+const CACHE = 'lapki-v2';
 const SHELL = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
-  'js/app.js', 'js/ui.js', 'js/logic.js', 'js/store.js', 'js/data.js', 'js/scan.js',
+  'js/app.js', 'js/env.js', 'js/ui.js', 'js/logic.js', 'js/store.js', 'js/data.js', 'js/scan.js',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
 ];
 
